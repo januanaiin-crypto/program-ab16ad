@@ -1,0 +1,25 @@
+[package]
+name = "commerce_town"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+pinocchio = { version = "0.11.2", features = ["cpi", "alloc"] }
+pinocchio-system = "0.6.1"
+pinocchio-token = "0.7.0"
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# toolchain for the verifiable build (solana-verify picks the matching build image)
+[workspace]
+
+[workspace.metadata.cli]
+solana = "4.1.2"
