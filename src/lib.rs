@@ -14,6 +14,11 @@ pub const TOKEN_2022: Address = Address::from_str_const("TokenzQdBNbLqP5VEhdkAS6
 pub const CORE: Address = Address::from_str_const("CoREENxT6tW1HoK8ypY1SxRMZTcVPm7R94rH4PZNhX7d");
 pub const JUPITER: Address = Address::from_str_const("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4");
 pub const SYSTEM: Address = Address::from_str_const("11111111111111111111111111111111");
+pub const SYSVAR: Address = Address::from_str_const("Sysvar1111111111111111111111111111111111111");
+// runtime-reserved ids (agave reserved-account-keys) that are not executable on mainnet (checked 2026-10-01): always read-only
+pub const RESERVED: [Address; 5] = [Address::from_str_const("StakeConfig11111111111111111111111111111111"),
+    Address::from_str_const("LoaderV411111111111111111111111111111111111"), Address::from_str_const("ZkTokenProof1111111111111111111111111111111"),
+    Address::from_str_const("NativeLoader1111111111111111111111111111111"), Address::from_str_const("Sysvar1111111111111111111111111111111111111")];
 pub const LOADER: Address = Address::from_str_const("BPFLoaderUpgradeab1e11111111111111111111111");
 
 pub mod c {

@@ -3,7 +3,7 @@ use pinocchio::{AccountView,Address,ProgramResult};
 use pinocchio::error::ProgramError;
 use pinocchio::cpi::{Seed,Signer,invoke_signed,invoke_signed_with_slice};
 use pinocchio::instruction::{InstructionAccount,InstructionView};
-use pinocchio_system::instructions::CreateAccount;
+use pinocchio_system::instructions::{CreateAccount,Transfer};
 use crate::*;
 
 fn acc(a:&[AccountView],i:usize)->Result<&AccountView,ProgramError>{account(a,i)}
@@ -59,8 +59,17 @@ fn create_ctown_token(pid:&Address,payer:&AccountView,new:&AccountView,name:&[u8
 fn create(pid:&Address,payer:&AccountView,new:&AccountView,name:&[u8],extra:Option<&[u8]>,len:usize,owner:&Address)->ProgramResult{
     let mut seeds=Vec::new();seeds.push(Seed::from(name));if let Some(v)=extra{seeds.push(Seed::from(v));}
     let two=[name,extra.unwrap_or(b"")];let bump=pda(pid,if extra.is_some(){&two[..]}else{&two[..1]},new)?;
-    let b=[bump];seeds.push(Seed::from(&b));let signer=Signer::from(seeds.as_slice());
-    CreateAccount::with_minimum_balance(payer,new,len as u64,owner,None)?.invoke_signed(&[signer])
+    let b=[bump];seeds.push(Seed::from(&b));
+    unsquat(new,payer,&[Signer::from(seeds.as_slice())])?;
+    CreateAccount::with_minimum_balance(payer,new,len as u64,owner,None)?.invoke_signed(&[Signer::from(seeds.as_slice())])
+}
+// Anyone can send lamports to a PDA before it exists, and CreateAccount then refuses it for good (mint_team, orders,
+// set_ctown_mint). The PDA is still system-owned and empty (only its seeds can allocate or assign it): hand the
+// lamports to the payer, signed by the PDA, so the create goes through.
+fn unsquat(new:&AccountView,payer:&AccountView,signers:&[Signer])->ProgramResult{
+    let n=new.lamports();if n==0{return Ok(());}
+    need(new.owned_by(&SYSTEM)&&new.is_data_empty(),5)?;
+    Transfer{from:new,to:payer,lamports:n}.invoke_signed(signers)
 }
 fn create_token(pid:&Address,payer:&AccountView,new:&AccountView,name:&[u8],mint:&AccountView,vault:&AccountView)->ProgramResult{
     create(pid,payer,new,name,None,165,&pinocchio_token::ID)?;
@@ -142,6 +151,9 @@ fn initialize(pid:&Address,a:&mut[AccountView],d:&[u8])->ProgramResult{
     for(i,v)in [3,10,25,50].iter().enumerate(){w16(&mut c,c::CAPACITY+i*2,*v)}
     c[c::URI_LEN]=d[64];need(d[64]<=64&&core::str::from_utf8(&d[65..65+d[64] as usize]).is_ok(),2)?;c[c::URI..c::URI+64].copy_from_slice(&d[65..129]);
     w8(&mut c,c::GLOBAL_CAP,100_000_000);c[c::BURN]=d[129];flag(c[c::BURN])?;
+    // safe numbers before set_params: 24 h review, 7 d unbond, 5% reward cap, tiers above Starter out of reach
+    c[c::REVIEW..c::REVIEW+4].copy_from_slice(&86400u32.to_le_bytes());c[c::COOLDOWN..c::COOLDOWN+4].copy_from_slice(&604800u32.to_le_bytes());
+    w16(&mut c,c::REWARD_CAP,500);for i in 1..4{w8(&mut c,c::THRESH+i*8,u64::MAX);}
     save(&mut a[0],&c)
 }
 #[inline(never)]
@@ -156,7 +168,7 @@ fn set_params(pid:&Address,a:&mut[AccountView],d:&[u8])->ProgramResult{
     let cooldown=u32::from_le_bytes(d[60..64].try_into().map_err(|_|err(2))?);
     let review=u32::from_le_bytes(d[64..68].try_into().map_err(|_|err(2))?);
     let rc=x16(d,68)?;let global=x8(d,70)?;let uri_len=d[78] as usize;
-    need(cooldown<=30*86400&&review>=60&&review<=30*86400&&rc<=10000&&global>0&&uri_len<=64,2)?;
+    need(cooldown<=30*86400&&review>=60&&review<=30*86400&&rc<=500&&global>0&&uri_len<=64,2)?;
     need(core::str::from_utf8(&d[79..79+uri_len]).is_ok(),2)?;
     flag(d[143])?;
     w8(&mut c,c::MINT_PRICE,price);for i in 0..3{w16(&mut c,c::SPLIT+i*2,split[i]);}
@@ -235,6 +247,7 @@ fn core_asset(pid:&Address,a:&[AccountView],team:u16,role:u8,uri_base:&[u8])->Pr
     let abuf=[ab];let cbuf=[cb];
     let sa=[Seed::from(b"agent"),Seed::from(&tid),Seed::from(&roleb),Seed::from(&abuf)];
     let sc=[Seed::from(b"collection_authority"),Seed::from(&cbuf)];
+    unsquat(asset,acc(a,1)?,&[Signer::from(&sa)])?;
     let signers=[Signer::from(&sa),Signer::from(&sc)];
     invoke_signed(&InstructionView{program_id:&CORE,accounts:&metas,data:&data},
         &[asset,acc(a,8)?,acc(a,9)?,acc(a,1)?,acc(a,1)?,core,acc(a,15)?,core],&signers)
@@ -518,6 +531,10 @@ fn buyback(pid:&Address,a:&mut[AccountView],d:&[u8])->ProgramResult{
     let spent=sub(before_in,token(acc(a,3)?,&usdc,v.address())?)?;
     let received=sub(ctown_token(acc(a,6)?,&ctown,v.address(),program)?,before_out)?;
     need(spent>0&&spent<=n&&received>=min,12)?;
+    // the operator key's whole daily reach, buybacks included, stays under the town cap (a leaked key or a bad route
+    // cannot empty the buyback vault in one go)
+    let today=day(now()?);if xi(&c,c::GLOBAL_DAY)?!=today{wi(&mut c,c::GLOBAL_DAY,today);w8(&mut c,c::GLOBAL_SPENT,0);}
+    need(add(x8(&c,c::GLOBAL_SPENT)?,spent)?<=x8(&c,c::GLOBAL_CAP)?,9)?;inc(&mut c,c::GLOBAL_SPENT,spent)?;
     if c[c::BURN]==1{burn(acc(a,6)?,acc(a,4)?,v,program,decimals,received,&[Signer::from(&seeds)])?;}
     inc(&mut c,c::TOTALS+24,spent)?;
     inc(&mut c,c::TOTALS+32,received)?;
@@ -561,13 +578,14 @@ fn close_store(pid:&Address,a:&mut[AccountView])->ProgramResult{
     let st=store(acc(a,2)?,pid)?;let team=x16(&st,s::TEAM)?;
     need(x8(&st,s::BAL)?==0&&x8(&st,s::ESCROW)?==0&&x16(&st,s::ACTIVE)?==0&&x8(&st,s::BOND)?==0,9)?;
     // rent to the Shopkeeper holder. To the admin only when the holder is gone or parked on an address that cannot take
-    // lamports (reserved = demoted to read-only, executable, or the store itself), so one holder cannot block the wind-down
+    // lamports (a program, a sysvar, a runtime-reserved id, or the store itself), so one holder cannot block the wind-down. Judged by the
+    // account itself, never by the writable flag the caller chose.
     let admin=key(&c,c::ADMIN)?;
     match holder(pid,acc(a,3)?,team)?{
         None=>need(acc(a,4)?.address()==&admin,5)?,
         Some(h)=>if acc(a,4)?.address()!=&h{
             let hv=acc(a,5)?;
-            need(acc(a,4)?.address()==&admin&&hv.address()==&h&&(!hv.is_writable()||hv.executable()||&h==acc(a,2)?.address()),5)?;
+            need(acc(a,4)?.address()==&admin&&hv.address()==&h&&(hv.executable()||hv.owned_by(&SYSVAR)||RESERVED.contains(&h)||&h==acc(a,2)?.address()),5)?;
         }
     }
     inc16(&mut c,c::CLOSED)?;save(&mut a[0],&c)?;
